@@ -1,0 +1,3 @@
+import Link from 'next/link';import type {MatchRow} from '@/lib/data';
+const fmt=(d:string)=>new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(d));
+export function MatchCard({m}:{m:MatchRow}){return <Link className="match" href={`/matches/${m.id}`}><div className="league">{m.league?.name||'Competição'}</div><div className="teams"><b>{m.home_team?.name||'Mandante'}</b><span>{m.home_score??'–'} × {m.away_score??'–'}</span><b>{m.away_team?.name||'Visitante'}</b></div><div className="meta"><span>{fmt(m.kickoff_at)}</span><span className="badge">{m.status_label}</span></div></Link>}
