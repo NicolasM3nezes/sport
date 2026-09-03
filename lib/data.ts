@@ -5,9 +5,26 @@ export type MatchRow={
   home_score:number|null;away_score:number|null;venue:string|null;country:string|null;
   league:any;home_team:any;away_team:any;round?:string|null;season?:number|null;
   referee?:string|null;venue_city?:string|null;provider?:string;last_synced_at?:string|null;
+  analysis?:any|null;
 };
 
 const selectMatch='id,kickoff_at,status_code,status_label,home_score,away_score,venue,country,round,season,referee,venue_city,provider,last_synced_at,league:leagues(name,country,logo_url),home_team:teams!matches_home_team_id_fkey(name,logo_url),away_team:teams!matches_away_team_id_fkey(name,logo_url)';
+
+async function attachAnalyses(matches:MatchRow[]){
+  if(!matches.length)return matches;
+  const wanted=new Set(matches.map(m=>m.id));
+  const since=new Date(Date.now()-72*60*60*1000).toISOString();
+  const {data,error}=await db.from('prediction_runs')
+    .select('id,match_id,status,generated_at,model:model_versions(code,name,version,model_type),predictions(id,market,selection,line,probability,fair_odd,bookmaker_odd,implied_probability,edge,expected_value,rank)')
+    .eq('status','completed').gte('generated_at',since).order('generated_at',{ascending:false}).limit(500);
+  if(error)throw error;
+  const map=new Map<string,any>();
+  for(const r of data||[]){
+    const matchId=(r as any).match_id;
+    if(wanted.has(matchId)&&!map.has(matchId))map.set(matchId,r);
+  }
+  return matches.map(m=>({...m,analysis:map.get(m.id)||null}));
+}
 
 export async function todayMatches(){
   const now=new Date();
@@ -16,26 +33,27 @@ export async function todayMatches(){
   const end=new Date(parts+'T23:59:59-03:00').toISOString();
   const {data,error}=await db.from('matches').select(selectMatch).gte('kickoff_at',start).lte('kickoff_at',end).order('kickoff_at');
   if(error)throw error;
-  return (data||[]) as unknown as MatchRow[];
+  return attachAnalyses((data||[]) as unknown as MatchRow[]);
 }
 
 export async function upcoming(limit=30){
   const {data,error}=await db.from('matches').select(selectMatch).gte('kickoff_at',new Date().toISOString()).order('kickoff_at').limit(limit);
   if(error)throw error;
-  return (data||[]) as unknown as MatchRow[];
+  return attachAnalyses((data||[]) as unknown as MatchRow[]);
 }
 
 export async function dashboard(){
-  const [m,p,o]=await Promise.all([
+  const [m,p,o,e]=await Promise.all([
     todayMatches(),
-    db.from('prediction_runs').select('*',{count:'exact',head:true}).gte('generated_at',new Date(Date.now()-864e5).toISOString()),
-    db.from('predictions').select('*',{count:'exact',head:true}).gt('edge',0)
+    db.from('prediction_runs').select('*',{count:'exact',head:true}).gte('generated_at',new Date(Date.now()-864e5).toISOString()).eq('status','completed'),
+    db.from('predictions').select('*',{count:'exact',head:true}).gt('edge',0),
+    db.from('prediction_results').select('*',{count:'exact',head:true})
   ]);
-  return {matches:m,predictions:p.count||0,opportunities:o.count||0};
+  return {matches:m,predictions:p.count||0,opportunities:o.count||0,evaluated:e.count||0};
 }
 
 export async function opportunities(){
-  const {data,error}=await db.from('predictions').select('id,market,selection,probability,bookmaker_odd,implied_probability,edge,expected_value,created_at,prediction_run:prediction_runs(match:matches(kickoff_at,home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name)))').gt('edge',0).order('edge',{ascending:false}).limit(100);
+  const {data,error}=await db.from('predictions').select('id,market,selection,probability,bookmaker_odd,implied_probability,edge,expected_value,created_at,prediction_run:prediction_runs(match:matches(kickoff_at,home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name)))').not('bookmaker_odd','is',null).gt('edge',0).order('edge',{ascending:false}).limit(100);
   if(error)throw error;return data||[];
 }
 
@@ -44,18 +62,18 @@ export async function matchById(id:string){
   if(error)throw error;if(!match)return null;
   const [stats,runs]=await Promise.all([
     db.from('team_match_statistics').select('*,team:teams(name,logo_url)').eq('match_id',id),
-    db.from('prediction_runs').select('id,status,data_quality_score,confidence_score,confidence_level,expected_home_goals,expected_away_goals,input_sample_size,factors,generated_at,model:model_versions(name,version),predictions(id,market,selection,line,probability,fair_odd,bookmaker_odd,implied_probability,edge,expected_value,rank)').eq('match_id',id).order('generated_at',{ascending:false}).limit(3)
+    db.from('prediction_runs').select('id,status,data_quality_score,confidence_score,confidence_level,expected_home_goals,expected_away_goals,input_sample_size,factors,generated_at,model:model_versions(code,name,version,model_type),predictions(id,market,selection,line,probability,fair_odd,bookmaker_odd,implied_probability,edge,expected_value,rank)').eq('match_id',id).eq('status','completed').order('generated_at',{ascending:false}).limit(5)
   ]);
   return {match:match as unknown as MatchRow,stats:stats.data||[],analyses:runs.data||[]};
 }
 
 export async function analysisRows(){
-  const {data,error}=await db.from('prediction_runs').select('id,status,confidence_level,confidence_score,data_quality_score,generated_at,model:model_versions(name,version),match:matches(id,kickoff_at,home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name))').order('generated_at',{ascending:false}).limit(100);
+  const {data,error}=await db.from('prediction_runs').select('id,status,confidence_level,confidence_score,data_quality_score,generated_at,model:model_versions(code,name,version,model_type),predictions(id,market,selection,line,probability,fair_odd,rank),match:matches(id,kickoff_at,status_code,status_label,league:leagues(name,country),home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name))').eq('status','completed').order('generated_at',{ascending:false}).limit(150);
   if(error)throw error;return data||[];
 }
 
 export async function historyRows(){
-  const {data,error}=await db.from('predictions').select('id,market,selection,probability,bookmaker_odd,edge,created_at,result:prediction_results(outcome,correct,profit_loss_one_unit,evaluated_at),prediction_run:prediction_runs(match:matches(id,kickoff_at,home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name)))').order('created_at',{ascending:false}).limit(150);
+  const {data,error}=await db.from('predictions').select('id,market,selection,probability,fair_odd,bookmaker_odd,edge,created_at,result:prediction_results(outcome,correct,actual_value,profit_loss_one_unit,evaluated_at),prediction_run:prediction_runs(model:model_versions(name,code),match:matches(id,kickoff_at,home_score,away_score,home_team:teams!matches_home_team_id_fkey(name),away_team:teams!matches_away_team_id_fkey(name)))').not('prediction_results','is',null).order('created_at',{ascending:false}).limit(200);
   if(error)throw error;return data||[];
 }
 
@@ -65,16 +83,18 @@ export async function backtestRows(){
 }
 
 export async function metricRows(){
-  const {data,error}=await db.from('model_metrics').select('id,market,sample_size,accuracy,brier_score,log_loss,calibration_error,roi,created_at,model:model_versions(name,version),league:leagues(name)').order('created_at',{ascending:false}).limit(100);
+  const {data,error}=await db.from('model_metrics').select('id,market,sample_size,accuracy,brier_score,log_loss,calibration_error,roi,window_start,window_end,created_at,model:model_versions(name,version,code),league:leagues(name)').order('created_at',{ascending:false}).limit(100);
   if(error)throw error;return data||[];
 }
 
 export async function systemStatus(){
-  const [{count:matches},{count:leagues},{count:teams},{data:last}]=await Promise.all([
+  const [{count:matches},{count:leagues},{count:teams},{count:analyses},{count:odds},{data:last}]=await Promise.all([
     db.from('matches').select('*',{count:'exact',head:true}),
     db.from('leagues').select('*',{count:'exact',head:true}),
     db.from('teams').select('*',{count:'exact',head:true}),
+    db.from('prediction_runs').select('*',{count:'exact',head:true}).eq('status','completed'),
+    db.from('odds').select('*',{count:'exact',head:true}),
     db.from('matches').select('last_synced_at,provider').not('last_synced_at','is',null).order('last_synced_at',{ascending:false}).limit(1)
   ]);
-  return {matches:matches||0,leagues:leagues||0,teams:teams||0,lastSync:last?.[0]?.last_synced_at||null,provider:last?.[0]?.provider||null};
+  return {matches:matches||0,leagues:leagues||0,teams:teams||0,analyses:analyses||0,odds:odds||0,lastSync:last?.[0]?.last_synced_at||null,provider:last?.[0]?.provider||null};
 }
