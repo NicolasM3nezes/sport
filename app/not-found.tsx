@@ -1,0 +1,1 @@
+import Link from 'next/link';export default function NotFound(){return <div className="panel"><span className="eyebrow">404</span><h2>Página não encontrada</h2><p>Essa rota não existe ou a partida solicitada não foi encontrada.</p><Link href="/games/today" className="badge">Voltar para jogos de hoje</Link></div>}
